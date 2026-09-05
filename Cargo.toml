@@ -11,6 +11,7 @@ readme = "README.md"
 license = "BSD-3-Clause"
 keywords = ["podman", "ssh", "development", "containers", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [".github/**"]
 
 [dependencies]
 anyhow = "1"

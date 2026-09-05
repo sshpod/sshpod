@@ -1,0 +1,29 @@
+name: Coverage
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo llvm-cov --locked --all-features --lcov --output-path target/coverage.lcov
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: target/coverage.lcov
+          if-no-files-found: error
+          retention-days: 14
