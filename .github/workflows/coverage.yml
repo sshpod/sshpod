@@ -17,10 +17,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
-      - run: cargo llvm-cov --locked --all-features --lcov --output-path target/coverage.lcov
+      - name: Run tests with coverage
+        run: cargo test --locked --all-features --verbose -- --nocapture
+        env:
+          RUST_BACKTRACE: full
+          CARGO_INCREMENTAL: 0
+          LLVM_PROFILE_FILE: coverage-%p-%m.profraw
+          RUSTFLAGS: -Cinstrument-coverage -Ccodegen-units=1 -Clink-dead-code -Coverflow-checks=off
+          RUSTDOCFLAGS: -Cinstrument-coverage -Ccodegen-units=1 -Clink-dead-code -Coverflow-checks=off
+      - name: Install grcov
+        run: cargo install grcov --locked
+      - name: Generate coverage report
+        run: >-
+          grcov . --binary-path target/debug/ -s . -t lcov --branch
+          --ignore-not-existing --ignore '../**' --ignore '/*'
+          -o target/coverage.lcov
       - uses: actions/upload-artifact@v7
         with:
           name: coverage
