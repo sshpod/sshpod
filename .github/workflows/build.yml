@@ -21,10 +21,12 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,9 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           version=$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)
-          binary=sshpod
-          if [[ "$RUNNER_OS" == Windows ]]; then binary=sshpod.exe; fi
-          path="target/$TARGET/release/$binary"
+          path="target/$TARGET/release/sshpod"
           test "$("$path" -V)" = "sshpod $version"
           test "$("$path" --version)" = "sshpod $version - $(git rev-parse HEAD)"
           "$path" --help
