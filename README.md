@@ -1,5 +1,7 @@
-[![Test](https://github.com/sshpod/sshpod/actions/workflows/test.yml/badge.svg)](https://github.com/sshpod/sshpod/actions/workflows/test.yml)
+[![CI](https://github.com/sshpod/sshpod/actions/workflows/ci.yml/badge.svg)](https://github.com/sshpod/sshpod/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/github/sshpod/sshpod/graph/badge.svg?token=29EBUDHTAW)](https://codecov.io/github/sshpod/sshpod)
+[![Crates.io](https://img.shields.io/crates/v/sshpod.svg)](https://crates.io/crates/sshpod)
+[![License](https://img.shields.io/crates/l/sshpod.svg)](https://github.com/sshpod/sshpod/blob/develop/LICENSE)
 
 # sshpod
 
