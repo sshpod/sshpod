@@ -1,6 +1,20 @@
+//! Podman CLI integration.
+
+mod commands;
+
 use anyhow::{Context, Result, bail, ensure};
 use std::process::{Command, Output, Stdio};
 
+pub(crate) use commands::{
+    ContainerSpec, build_image, check_available, container_status, create, exec, start, stop,
+};
+
+/// Execute `podman --version` and return Podman's version text.
+///
+/// # Errors
+///
+/// Returns an error when Podman cannot be executed, exits unsuccessfully, or
+/// returns empty or invalid output.
 pub fn version() -> Result<String> {
     version_with(&mut Command::new("podman"))
 }

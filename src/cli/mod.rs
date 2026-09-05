@@ -1,10 +1,6 @@
-mod actions;
-mod args;
+pub mod actions;
+pub mod commands;
+pub mod dispatch;
 
-use clap::Parser;
-
-pub fn run() -> anyhow::Result<()> {
-    match args::Args::parse().command {
-        args::Command::Doctor => actions::doctor::execute(),
-    }
-}
+mod start;
+pub use self::start::start;
