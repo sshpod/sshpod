@@ -44,11 +44,11 @@ impl Executor {
 
     pub(crate) fn command_spec(&self, program: &str, args: &[String]) -> CommandSpec {
         match &self.provider {
-            Provider::Local => CommandSpec {
+            Provider::Local { .. } => CommandSpec {
                 program: program.to_owned(),
                 args: args.to_vec(),
             },
-            Provider::Ssh { host } => CommandSpec {
+            Provider::Ssh { host, .. } => CommandSpec {
                 program: "ssh".to_owned(),
                 args: vec!["--".to_owned(), host.clone(), shell_join(program, args)],
             },
@@ -72,13 +72,15 @@ impl Executor {
         };
         let mut command = Command::new(&spec.program);
         command.args(&spec.args).stdin(Stdio::null());
-        if matches!(self.provider, Provider::Local)
+        if matches!(self.provider, Provider::Local { .. })
             && let Some(directory) = directory
         {
             command.current_dir(Path::new(directory));
         }
         let output = command.output().with_context(|| match self.provider {
-            Provider::Local => format!("could not execute {program:?} on provider {:?}", self.name),
+            Provider::Local { .. } => {
+                format!("could not execute {program:?} on provider {:?}", self.name)
+            }
             Provider::Ssh { .. } => {
                 format!("could not execute system SSH for provider {:?}", self.name)
             }
@@ -121,8 +123,8 @@ impl Executor {
 
     fn command_spec_in(&self, directory: &str, program: &str, args: &[String]) -> CommandSpec {
         match &self.provider {
-            Provider::Local => self.command_spec(program, args),
-            Provider::Ssh { host } => CommandSpec {
+            Provider::Local { .. } => self.command_spec(program, args),
+            Provider::Ssh { host, .. } => CommandSpec {
                 program: "ssh".to_owned(),
                 args: vec![
                     "--".to_owned(),
@@ -178,7 +180,12 @@ mod tests {
 
     #[test]
     fn constructs_local_command() {
-        let executor = Executor::new("local", &Provider::Local);
+        let executor = Executor::new(
+            "local",
+            &Provider::Local {
+                podman: "podman".into(),
+            },
+        );
         let spec = executor.command_spec("podman", &["--version".to_owned()]);
         assert_eq!(spec.program, "podman");
         assert_eq!(spec.args, ["--version"]);
@@ -190,6 +197,8 @@ mod tests {
             "sandbox",
             &Provider::Ssh {
                 host: "sandbox".to_owned(),
+                podman: "podman".to_owned(),
+                ssh_args: Vec::new(),
             },
         );
         let spec = executor.command_spec(

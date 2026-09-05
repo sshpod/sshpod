@@ -1,14 +1,16 @@
 use std::{
-    fs, process,
+    fs,
+    os::unix::fs::PermissionsExt,
+    process,
     process::Command,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-fn config_path(name: &str) -> std::path::PathBuf {
+fn test_directory(name: &str) -> std::path::PathBuf {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("sshpod-cli-{}-{id}-{name}.toml", process::id()))
+    std::env::temp_dir().join(format!("sshpod-cli-{}-{id}-{name}", process::id()))
 }
 
 #[test]
@@ -54,14 +56,24 @@ fn doctor_reports_missing_podman_on_stderr() -> anyhow::Result<()> {
 
 #[test]
 fn provider_add_list_and_delete_persist_configuration() -> anyhow::Result<()> {
-    let config = config_path("providers");
+    let directory = test_directory("providers");
+    let config = directory.join("sshpod/config.yaml");
     let binary = env!("CARGO_BIN_EXE_sshpod");
 
     let added = Command::new(binary)
         .args([
-            "provider", "add", "sandbox", "--type", "ssh", "--host", "sandbox",
+            "provider",
+            "add",
+            "sandbox",
+            "--type",
+            "ssh",
+            "--host",
+            "sandbox",
+            "--podman",
+            "docker",
+            "--ssh-arg=-A",
         ])
-        .env("SSHPOD_CONFIG", &config)
+        .env("XDG_CONFIG_HOME", &directory)
         .output()?;
     assert!(
         added.status.success(),
@@ -69,22 +81,120 @@ fn provider_add_list_and_delete_persist_configuration() -> anyhow::Result<()> {
         String::from_utf8_lossy(&added.stderr)
     );
     let contents = fs::read_to_string(&config)?;
-    assert!(contents.contains("[providers.sandbox]"));
-    assert!(contents.contains("host = \"sandbox\""));
+    assert!(contents.contains("sandbox:"));
+    assert!(contents.contains("host: sandbox"));
+    assert!(contents.contains("podman: docker"));
+    assert!(contents.contains("sshArgs:"));
 
     let listed = Command::new(binary)
         .args(["provider", "list"])
-        .env("SSHPOD_CONFIG", &config)
+        .env("XDG_CONFIG_HOME", &directory)
         .output()?;
     assert!(listed.status.success());
-    assert!(String::from_utf8(listed.stdout)?.contains("sandbox\tssh\tsandbox"));
+    assert!(String::from_utf8(listed.stdout)?.contains("sandbox\tssh\tsandbox\tdocker\t-"));
 
     let deleted = Command::new(binary)
         .args(["provider", "delete", "sandbox"])
-        .env("SSHPOD_CONFIG", &config)
+        .env("XDG_CONFIG_HOME", &directory)
         .output()?;
     assert!(deleted.status.success());
-    assert!(!fs::read_to_string(&config)?.contains("providers.sandbox"));
-    fs::remove_file(config)?;
+    assert!(!fs::read_to_string(&config)?.contains("sandbox:"));
+    fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[test]
+fn up_without_devcontainer_stops_before_podman_or_workspace_persistence() -> anyhow::Result<()> {
+    let directory = test_directory("missing-devcontainer");
+    let xdg = directory.join("xdg");
+    let project = directory.join("project");
+    let config = xdg.join("sshpod/config.yaml");
+    fs::create_dir_all(
+        config
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?,
+    )?;
+    fs::create_dir_all(&project)?;
+    fs::write(&config, "providers:\n  local:\n    type: local\n")?;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_sshpod"))
+        .args(["up", "demo"])
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("PATH", "")
+        .current_dir(&project)
+        .output()?;
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("no Dev Container configuration found"));
+    assert!(stderr.contains(".devcontainer/<folder>/devcontainer.json"));
+    let persisted = fs::read_to_string(&config)?;
+    assert!(!persisted.contains("workspaces:"));
+    fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[test]
+fn up_persists_an_explicit_nested_devcontainer_selection() -> anyhow::Result<()> {
+    let directory = test_directory("selected-devcontainer");
+    let project = directory.join("project");
+    let devcontainer = project.join(".devcontainer/rust/devcontainer.json");
+    let binary_directory = directory.join("bin");
+    let podman = binary_directory.join("podman");
+    fs::create_dir_all(
+        devcontainer.parent().ok_or_else(|| {
+            anyhow::anyhow!("test Dev Container configuration path has no parent")
+        })?,
+    )?;
+    fs::create_dir_all(&binary_directory)?;
+    fs::write(&devcontainer, r#"{"image":"alpine"}"#)?;
+    fs::write(
+        &podman,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+    echo "podman version test"
+elif [ "$1" = "container" ] && [ "$2" = "exists" ]; then
+    exit 0
+elif [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
+    echo "running"
+else
+    exit 64
+fi
+"#,
+    )?;
+    let mut permissions = fs::metadata(&podman)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&podman, permissions)?;
+
+    let xdg = directory.join("xdg");
+    let config = xdg.join("sshpod/config.yaml");
+    fs::create_dir_all(
+        config
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?,
+    )?;
+    fs::write(&config, "providers:\n  local:\n    type: local\n")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_sshpod"))
+        .args([
+            "up",
+            "demo",
+            "--config",
+            ".devcontainer/rust/devcontainer.json",
+        ])
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("PATH", &binary_directory)
+        .current_dir(&project)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let persisted = fs::read_to_string(&config)?;
+    assert!(persisted.contains("workspaces:"));
+    assert!(persisted.contains("devcontainer: .devcontainer/rust/devcontainer.json"));
+    fs::remove_dir_all(directory)?;
     Ok(())
 }

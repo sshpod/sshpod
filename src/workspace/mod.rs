@@ -65,6 +65,7 @@ struct ResolvedTarget {
     provider_name: String,
     provider: Provider,
     source: String,
+    devcontainer: Option<String>,
 }
 
 #[derive(Debug)]
@@ -73,6 +74,8 @@ enum Project {
     Remote {
         root: String,
         config_directory: String,
+        config_path: String,
+        persist_selection: bool,
         config: DevContainer,
     },
 }
@@ -94,6 +97,22 @@ impl Project {
         }
     }
 
+    fn config_path(&self) -> &str {
+        match self {
+            Self::Local(project) => &project.config_path,
+            Self::Remote { config_path, .. } => config_path,
+        }
+    }
+
+    const fn persist_selection(&self) -> bool {
+        match self {
+            Self::Local(project) => project.persist_selection,
+            Self::Remote {
+                persist_selection, ..
+            } => *persist_selection,
+        }
+    }
+
     const fn config(&self) -> &DevContainer {
         match self {
             Self::Local(project) => &project.config,
@@ -106,6 +125,7 @@ pub(crate) fn up(
     store: &Store,
     workspace_name: &str,
     requested_provider: Option<&str>,
+    requested_devcontainer: Option<&str>,
     current_directory: &Path,
 ) -> Result<UpResult> {
     validate_name(workspace_name, "workspace")?;
@@ -118,9 +138,22 @@ pub(crate) fn up(
     )?;
 
     let executor = Executor::new(&target.provider_name, &target.provider);
-    podman::check_available(&executor)?;
     let source = prepare_source(&executor, workspace_name, &target)?;
-    let project = load_project(&executor, &source)?;
+    let project = load_project(
+        &executor,
+        &source,
+        requested_devcontainer,
+        target.devcontainer.as_deref(),
+    )?;
+    if project.persist_selection() {
+        let configured_target = config
+            .workspaces
+            .get_mut(workspace_name)
+            .and_then(|workspace| workspace.targets.get_mut(&target.provider_name))
+            .context("selected workspace target disappeared before it could be saved")?;
+        configured_target.devcontainer = Some(project.config_path().to_owned());
+    }
+    podman::check_available(&executor)?;
     // Persist only after the source and its devcontainer configuration are valid.
     // Saving before container creation still makes partial Podman failures visible
     // to `list` and recoverable through `down`.
@@ -198,6 +231,7 @@ fn resolve_up_target(
                 provider_name: provider_name.to_owned(),
                 provider,
                 source: target.source.clone(),
+                devcontainer: target.devcontainer.clone(),
             });
         }
         let source = infer_source(&provider, current_directory)?;
@@ -206,6 +240,7 @@ fn resolve_up_target(
             provider_name: provider_name.to_owned(),
             provider,
             source,
+            devcontainer: None,
         });
     }
 
@@ -233,6 +268,7 @@ fn resolve_up_target(
             provider_name,
             provider,
             source: target.source.clone(),
+            devcontainer: target.devcontainer.clone(),
         });
     }
     let source = infer_source(&provider, current_directory)?;
@@ -241,6 +277,7 @@ fn resolve_up_target(
         provider_name,
         provider,
         source,
+        devcontainer: None,
     })
 }
 
@@ -261,22 +298,21 @@ fn resolve_configured_target(
         .get(&provider_name)
         .context("workspace target references a missing provider")?
         .clone();
-    let source = workspace
+    let target = workspace
         .targets
         .get(&provider_name)
-        .context("selected workspace target disappeared")?
-        .source
-        .clone();
+        .context("selected workspace target disappeared")?;
     Ok(ResolvedTarget {
         provider_name,
         provider,
-        source,
+        source: target.source.clone(),
+        devcontainer: target.devcontainer.clone(),
     })
 }
 
 fn infer_source(provider: &Provider, current_directory: &Path) -> Result<String> {
     match provider {
-        Provider::Local => Ok(current_directory
+        Provider::Local { .. } => Ok(current_directory
             .canonicalize()
             .with_context(|| {
                 format!(
@@ -318,13 +354,14 @@ fn insert_target(config: &mut Config, workspace: &str, provider: &str, source: &
             provider.to_owned(),
             WorkspaceTarget {
                 source: source.to_owned(),
+                devcontainer: None,
             },
         );
 }
 
 fn prepare_source(executor: &Executor, workspace: &str, target: &ResolvedTarget) -> Result<String> {
     match target.provider {
-        Provider::Local => Ok(target.source.clone()),
+        Provider::Local { .. } => Ok(target.source.clone()),
         Provider::Ssh { .. } if is_git_source(&target.source) => {
             let home = executor.run("pwd", &[])?;
             let parent = join_path(&home, ".local/share/sshpod/workspaces");
@@ -367,32 +404,59 @@ fn prepare_source(executor: &Executor, workspace: &str, target: &ResolvedTarget)
     }
 }
 
-fn load_project(executor: &Executor, source: &str) -> Result<Project> {
+fn load_project(
+    executor: &Executor,
+    source: &str,
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Result<Project> {
     match executor.provider() {
-        Provider::Local => Ok(Project::Local(devcontainer::discover_local(Path::new(
-            source,
-        ))?)),
-        Provider::Ssh { .. } => load_remote_project(executor, source),
+        Provider::Local { .. } => Ok(Project::Local(devcontainer::discover_local(
+            Path::new(source),
+            requested,
+            persisted,
+        )?)),
+        Provider::Ssh { .. } => load_remote_project(executor, source, requested, persisted),
     }
 }
 
-fn load_remote_project(executor: &Executor, source: &str) -> Result<Project> {
+fn load_remote_project(
+    executor: &Executor,
+    source: &str,
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Result<Project> {
+    let candidates = remote_config_candidates(executor, source)?;
+    devcontainer::ensure_config_candidates(&candidates, source)?;
+    let choice = devcontainer::choose_config(source, &candidates, requested, persisted)?;
+    let path = join_path(source, &choice.path);
+    let contents = executor.run("cat", std::slice::from_ref(&path))?;
+    let config = DevContainer::parse(contents.as_bytes(), &path)?;
+    let config_directory = Path::new(&path)
+        .parent()
+        .context("remote devcontainer path has no parent")?
+        .display()
+        .to_string();
+    Ok(Project::Remote {
+        root: source.to_owned(),
+        config_directory,
+        config_path: choice.path,
+        persist_selection: choice.persist,
+        config,
+    })
+}
+
+fn remote_config_candidates(executor: &Executor, source: &str) -> Result<Vec<String>> {
+    let mut candidates = Vec::new();
     for relative in devcontainer::config_relative_paths() {
-        let path = join_path(source, relative);
-        let probe = executor.run_status("test", &["-f".to_owned(), path.clone()])?;
+        let probe = executor.run_status_in(
+            Some(source),
+            "test",
+            &["-f".to_owned(), relative.to_owned()],
+        )?;
         if probe.status.success() {
-            let contents = executor.run("cat", std::slice::from_ref(&path))?;
-            let config = DevContainer::parse(contents.as_bytes(), &path)?;
-            let config_directory = Path::new(&path)
-                .parent()
-                .context("remote devcontainer path has no parent")?
-                .display()
-                .to_string();
-            return Ok(Project::Remote {
-                root: source.to_owned(),
-                config_directory,
-                config,
-            });
+            candidates.push(relative.to_owned());
+            continue;
         }
         if probe.status.code() != Some(1) {
             bail!(
@@ -403,8 +467,64 @@ fn load_remote_project(executor: &Executor, source: &str) -> Result<Project> {
             );
         }
     }
-    bail!(
-        ".devcontainer/devcontainer.json not found in remote workspace source {source:?} (also checked .devcontainer.json)"
+
+    let directory_probe = executor.run_status_in(
+        Some(source),
+        "test",
+        &["-d".to_owned(), ".devcontainer".to_owned()],
+    )?;
+    if directory_probe.status.success() {
+        let output = executor.run_in(
+            Some(source),
+            "find",
+            &[
+                ".devcontainer".to_owned(),
+                "-mindepth".to_owned(),
+                "2".to_owned(),
+                "-maxdepth".to_owned(),
+                "2".to_owned(),
+                "-type".to_owned(),
+                "f".to_owned(),
+                "-name".to_owned(),
+                "devcontainer.json".to_owned(),
+                "-print".to_owned(),
+            ],
+        )?;
+        candidates.extend(parse_nested_candidates(&output)?);
+    } else if directory_probe.status.code() != Some(1) {
+        bail!(
+            "failed to inspect devcontainer directory on provider {:?} ({}): {}",
+            executor.provider_name(),
+            directory_probe.status,
+            directory_probe.stderr.trim()
+        );
+    }
+    Ok(candidates)
+}
+
+fn parse_nested_candidates(output: &str) -> Result<Vec<String>> {
+    let mut candidates = output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            ensure!(
+                is_nested_config_path(line),
+                "remote Dev Container discovery returned unsupported path {line:?}"
+            );
+            Ok(line.to_owned())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    candidates.sort();
+    candidates.dedup();
+    Ok(candidates)
+}
+
+fn is_nested_config_path(path: &str) -> bool {
+    let mut parts = path.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(".devcontainer"), Some(folder), Some("devcontainer.json"), None)
+            if !folder.is_empty() && !matches!(folder, "." | "..")
     )
 }
 
@@ -644,7 +764,7 @@ fn is_git_source(source: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{container_name, is_git_source};
+    use super::{container_name, is_git_source, parse_nested_candidates};
 
     #[test]
     fn deterministic_container_names_include_provider() {
@@ -663,5 +783,20 @@ mod tests {
         assert!(is_git_source("git@github.com:owner/repository.git"));
         assert!(is_git_source("https://github.com/owner/repository"));
         assert!(!is_git_source(".local/share/project"));
+    }
+
+    #[test]
+    fn parses_sorted_one_level_remote_config_candidates() -> anyhow::Result<()> {
+        assert_eq!(
+            parse_nested_candidates(
+                ".devcontainer/rust/devcontainer.json\n.devcontainer/go/devcontainer.json"
+            )?,
+            [
+                ".devcontainer/go/devcontainer.json",
+                ".devcontainer/rust/devcontainer.json"
+            ]
+        );
+        assert!(parse_nested_candidates(".devcontainer/rust/deeper/devcontainer.json").is_err());
+        Ok(())
     }
 }

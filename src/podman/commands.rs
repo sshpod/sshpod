@@ -306,6 +306,8 @@ mod tests {
             "sandbox",
             &Provider::Ssh {
                 host: "sandbox".to_owned(),
+                podman: "podman".to_owned(),
+                ssh_args: Vec::new(),
             },
         );
         let unreachable = availability_output(&executor, &output(255, "connection refused"));

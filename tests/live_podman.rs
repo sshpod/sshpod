@@ -14,10 +14,10 @@ impl Drop for Cleanup {
     }
 }
 
-fn run(binary: &str, config: &Path, directory: &Path, args: &[&str]) -> anyhow::Result<String> {
+fn run(binary: &str, xdg: &Path, directory: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new(binary)
         .args(args)
-        .env("SSHPOD_CONFIG", config)
+        .env("XDG_CONFIG_HOME", xdg)
         .current_dir(directory)
         .output()?;
     anyhow::ensure!(
@@ -35,7 +35,7 @@ fn local_image_workspace_vertical_slice() -> anyhow::Result<()> {
     let workspace = format!("live-{}", process::id());
     let container = format!("sshpod-{workspace}-local");
     let directory = std::env::temp_dir().join(format!("sshpod-{workspace}"));
-    let config = directory.join("config.toml");
+    let xdg = directory.join("xdg");
     let project = directory.join("project");
     let devcontainer = project.join(".devcontainer/devcontainer.json");
     fs::create_dir_all(
@@ -59,13 +59,13 @@ fn local_image_workspace_vertical_slice() -> anyhow::Result<()> {
 
     run(
         binary,
-        &config,
+        &xdg,
         &project,
         &["provider", "add", "local", "--type", "local"],
     )?;
-    run(binary, &config, &project, &["up", &workspace])?;
-    let listed = run(binary, &config, &project, &[])?;
+    run(binary, &xdg, &project, &["up", &workspace])?;
+    let listed = run(binary, &xdg, &project, &[])?;
     anyhow::ensure!(listed.contains(&format!("{workspace}\tlocal\trunning:local")));
-    run(binary, &config, &project, &["down", &workspace])?;
+    run(binary, &xdg, &project, &["down", &workspace])?;
     Ok(())
 }

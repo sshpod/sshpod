@@ -1,15 +1,22 @@
+---
 name: Coverage
 
 on:
   workflow_call:
+    secrets:
+      CODECOV_TOKEN:
+        required: false
 
 permissions:
   contents: read
 
 jobs:
   coverage:
+    name: Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,3 +45,14 @@ jobs:
           path: target/coverage.lcov
           if-no-files-found: error
           retention-days: 14
+      - name: Upload to codecov.io
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage.lcov
+          flags: rust
+      - name: Upload to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          file: target/coverage.lcov
+          format: lcov

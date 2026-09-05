@@ -1,24 +1,49 @@
+[![Test](https://github.com/sshpod/sshpod/actions/workflows/test.yml/badge.svg)](https://github.com/sshpod/sshpod/actions/workflows/test.yml)
+[![codecov](https://codecov.io/github/sshpod/sshpod/graph/badge.svg?token=29EBUDHTAW)](https://codecov.io/github/sshpod/sshpod)
+
 # sshpod
 
-sshpod is an early-stage CLI for Podman development workspaces running locally or
-on an existing Linux machine over SSH. It is a small, focused alternative to
-DevPod for developers who only need these two execution targets.
+sshpod is an early-stage Dev Container orchestrator for Podman development
+workspaces running locally or on an existing Linux machine over SSH. It discovers
+and interprets `devcontainer.json`, then creates and manages the corresponding
+Podman workspace. It is a small, focused alternative to DevPod for developers who
+only need these two execution targets.
 
 Version 0.1.x implements a deliberately limited vertical slice: discover a
 `devcontainer.json`, create or start its container, report its status, and stop it.
 It does not implement the full Dev Container specification.
 
-```text
-devcontainer.json
-      |
-    sshpod
-    /    \
- local   SSH
-   |      |
- Podman  Podman
+```mermaid
+flowchart TD
+    up["sshpod up WORKSPACE"] --> target["Resolve provider and workspace source"]
+    target --> execution{Execution target}
+    execution -->|Local| local["Use the local checkout"]
+    execution -->|SSH| remote["Clone or reuse the checkout on the remote host"]
+    local --> discover["Discover and select devcontainer.json"]
+    remote --> discover
+    discover --> found{Configuration found?}
+    found -->|No| error["Stop with an actionable error"]
+    found -->|Yes| parse["Parse JSONC and validate the supported metadata"]
+    parse --> valid{Configuration supported?}
+    valid -->|No| error
+    valid -->|Yes| initialize["Check Podman and run initializeCommand"]
+    initialize --> image{Image source}
+    image -->|image| existing["Use the configured image"]
+    image -->|build| build["Build the image with Podman"]
+    existing --> state{Container state}
+    build --> state
+    state -->|Missing| create["Podman create and start"]
+    state -->|Stopped| start["Podman start"]
+    state -->|Running| reuse["Reuse the running container"]
+    create --> createHooks["onCreate → updateContent → postCreate"]
+    createHooks --> startHook["Run postStartCommand"]
+    start --> startHook
+    reuse --> startHook
+    startHook --> ready["Development workspace ready"]
 ```
 
-The primary compatibility target is the upstream
+sshpod owns the orchestration layer shown above; Podman remains the container
+runtime. The primary compatibility target is the upstream
 [Dev Container specification](https://containers.dev/implementors/spec/). sshpod
 follows that specification where practical instead of defining an sshpod-specific
 workspace format. The long-term goal is for existing DevPod/devcontainer projects
@@ -26,8 +51,24 @@ to migrate with little or no modification.
 
 ## Quick start
 
-The project must contain `.devcontainer/devcontainer.json` (or
-`.devcontainer.json`) with either `image` or a simple Dockerfile `build`.
+The project must contain a Dev Container configuration with either `image` or a
+simple Dockerfile `build`. sshpod searches these specification-defined locations
+in order:
+
+1. `.devcontainer/devcontainer.json`
+2. `.devcontainer.json`
+3. `.devcontainer/<folder>/devcontainer.json`
+
+If several nested configurations exist, an interactive terminal prompts for one.
+Scripts and other non-interactive callers must select one explicitly:
+
+```sh
+sshpod up myproject --config .devcontainer/rust/devcontainer.json
+```
+
+The selection is saved for that workspace/provider target. If no configuration is
+found, sshpod stops with an error listing the checked locations; it does not invent
+a default environment or launch a container.
 
 ```sh
 cargo install --path . --locked
@@ -70,35 +111,61 @@ The command surface is intentionally small:
 
 ```text
 sshpod [list]
-sshpod up <workspace> [--provider <name>]
+sshpod up <workspace> [--provider <name>] [--config <path>]
 sshpod down <workspace> [--provider <name>]
 sshpod provider list
-sshpod provider add <name> --type local
-sshpod provider add <name> --type ssh --host <ssh-config-host>
+sshpod provider add <name> --type local [--podman <command>]
+sshpod provider add <name> --type ssh --host <ssh-config-host> [--podman <command>] [--ssh-arg <arg>]...
 sshpod provider delete <name>
 sshpod doctor
 ```
 
-Configuration is TOML at `$SSHPOD_CONFIG`, or
-`$XDG_CONFIG_HOME/sshpod/config.toml`, falling back to
-`$HOME/.config/sshpod/config.toml`:
+Configuration is YAML at `$XDG_CONFIG_HOME/sshpod/config.yaml`. If
+`XDG_CONFIG_HOME` is unset, empty, or relative, sshpod falls back to
+`$HOME/.config/sshpod/config.yaml`. Reading configuration does not create either
+the file or its directory; commands that write configuration create the directory
+when needed.
 
-```toml
-version = 1
+```yaml
+---
+defaultProvider: local
 
-[providers.local]
-type = "local"
+providers:
+  local:
+    type: local
 
-[providers.sandbox]
-type = "ssh"
-host = "sandbox"
+  sandbox:
+    type: ssh
+    host: sandbox
 
-[workspaces.myproject.targets.local]
-source = "/home/me/projects/myproject"
+  infra-vm:
+    type: ssh
+    host: devops@infra.taildc7568.ts.net
+    podman: podman
+    sshArgs:
+      - -A
 
-[workspaces.myproject.targets.sandbox]
-source = "git@github.com:example/myproject.git"
+workspaces:
+  myproject:
+    targets:
+      local:
+        source: /home/me/projects/myproject
+      sandbox:
+        source: git@github.com:example/myproject.git
+        devcontainer: .devcontainer/rust/devcontainer.json
 ```
+
+Only `local` and `ssh` provider types are supported. `podman` defaults to
+`podman`, and `sshArgs` defaults to an empty list, so neither needs to be written
+in a minimal provider. SSH `host` values are passed to the system OpenSSH client,
+which means aliases from `~/.ssh/config` can be used directly.
+
+The `defaultProvider`, custom `podman`, and `sshArgs` values are part of the
+configuration API in this milestone, but do not yet alter workspace execution.
+Existing runtime provider selection and command behavior remain unchanged.
+
+The optional `devcontainer` value is managed when `--config` or the interactive
+configuration selector is used. Paths are relative to the workspace source.
 
 The target source for an SSH provider may instead be an existing absolute remote
 path. A logical workspace can have several provider/source targets. With one
@@ -108,11 +175,18 @@ scripts remain deterministic. Deleting a provider also removes its workspace
 targets and prunes workspaces that no longer have a target; it does not delete
 containers or source directories.
 
+The format intentionally carries none of DevPod's contexts, initialization
+metadata, plugin options, credential-injection settings, agent paths, ports, or
+inactivity state. sshpod stores only its own providers and optional workspace
+state.
+
 ## Dev Container support
 
 The current parser accepts JSON with C/C++-style comments and rejects unknown
 properties rather than pretending to support them. It currently supports:
 
+- specification-order discovery of `.devcontainer/devcontainer.json`,
+  `.devcontainer.json`, and one-level nested configurations
 - `name`, `image`, and simple `build.dockerfile` / `build.context`
 - `workspaceFolder`, a bind-only `workspaceMount`, and string-form bind `mounts`
 - `containerEnv`, `remoteEnv`, `containerUser`, and `remoteUser`
@@ -153,8 +227,9 @@ compatibility have been validated.
 
 ### Core
 
-- [ ] Discover `.devcontainer/devcontainer.json`
-- [ ] Discover `.devcontainer.json`
+- [x] Discover `.devcontainer/devcontainer.json`
+- [x] Discover `.devcontainer.json`
+- [x] Discover `.devcontainer/<folder>/devcontainer.json`
 - [ ] Parse JSONC and validate the Dev Container configuration
 - [ ] Environment-variable substitution
 - [ ] Deterministic workspace/container naming

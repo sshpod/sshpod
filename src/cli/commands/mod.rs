@@ -1,5 +1,5 @@
 use clap::{
-    Arg, ColorChoice, Command,
+    Arg, ArgAction, ColorChoice, Command,
     builder::styling::{AnsiColor, Effects, Styles},
 };
 
@@ -27,16 +27,20 @@ pub fn new() -> Command {
         .color(ColorChoice::Auto)
         .styles(styles())
         .subcommand(Command::new("list").about("List configured workspaces and their status"))
-        .subcommand(workspace_command("up", "Create or start a workspace"))
-        .subcommand(workspace_command("down", "Stop a workspace without deleting it"))
+        .subcommand(workspace_command("up", "Create or start a workspace", true))
+        .subcommand(workspace_command(
+            "down",
+            "Stop a workspace without deleting it",
+            false,
+        ))
         .subcommand(provider_command())
         .subcommand(Command::new("doctor").about(
             "Check that the local Podman CLI can run and report its version",
         ))
 }
 
-fn workspace_command(name: &'static str, about: &'static str) -> Command {
-    Command::new(name)
+fn workspace_command(name: &'static str, about: &'static str, accepts_config: bool) -> Command {
+    let command = Command::new(name)
         .about(about)
         .arg(
             Arg::new("workspace")
@@ -49,7 +53,17 @@ fn workspace_command(name: &'static str, about: &'static str) -> Command {
                 .long("provider")
                 .value_name("NAME")
                 .help("Provider target to use"),
+        );
+    if accepts_config {
+        command.arg(
+            Arg::new("config")
+                .long("config")
+                .value_name("PATH")
+                .help("Select a discovered devcontainer.json by workspace-relative path"),
         )
+    } else {
+        command
+    }
 }
 
 fn provider_command() -> Command {
@@ -74,6 +88,20 @@ fn provider_command() -> Command {
                         .long("host")
                         .value_name("SSH_CONFIG_HOST")
                         .help("OpenSSH host or alias; required for an SSH provider"),
+                )
+                .arg(
+                    Arg::new("podman")
+                        .long("podman")
+                        .value_name("COMMAND")
+                        .help("Podman-compatible executable or path (default: podman)"),
+                )
+                .arg(
+                    Arg::new("ssh-arg")
+                        .long("ssh-arg")
+                        .value_name("ARG")
+                        .help("OpenSSH argument to store; may be repeated")
+                        .action(ArgAction::Append)
+                        .allow_hyphen_values(true),
                 ),
         )
         .subcommand(
@@ -113,10 +141,33 @@ mod tests {
 
     #[test]
     fn parses_workspace_and_provider_commands() -> anyhow::Result<()> {
-        let up = new().try_get_matches_from(["sshpod", "up", "demo", "--provider", "sandbox"])?;
+        let up = new().try_get_matches_from([
+            "sshpod",
+            "up",
+            "demo",
+            "--provider",
+            "sandbox",
+            "--config",
+            ".devcontainer/rust/devcontainer.json",
+        ])?;
         assert_eq!(up.subcommand_name(), Some("up"));
+        assert!(
+            new()
+                .try_get_matches_from(["sshpod", "down", "demo", "--config", ".devcontainer.json"])
+                .is_err()
+        );
         let provider = new().try_get_matches_from([
-            "sshpod", "provider", "add", "sandbox", "--type", "ssh", "--host", "sandbox",
+            "sshpod",
+            "provider",
+            "add",
+            "sandbox",
+            "--type",
+            "ssh",
+            "--host",
+            "sandbox",
+            "--podman",
+            "/usr/bin/podman",
+            "--ssh-arg=-A",
         ])?;
         assert_eq!(provider.subcommand_name(), Some("provider"));
         Ok(())

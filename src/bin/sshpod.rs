@@ -9,7 +9,8 @@ fn main() -> Result<()> {
         cli::actions::Action::Up {
             workspace,
             provider,
-        } => cli::actions::up::execute(&workspace, provider.as_deref()),
+            devcontainer,
+        } => cli::actions::up::execute(&workspace, provider.as_deref(), devcontainer.as_deref()),
         cli::actions::Action::Down {
             workspace,
             provider,
@@ -19,7 +20,15 @@ fn main() -> Result<()> {
             name,
             provider_type,
             host,
-        } => cli::actions::provider::add(&name, &provider_type, host.as_deref()),
+            podman,
+            ssh_args,
+        } => cli::actions::provider::add(
+            &name,
+            &provider_type,
+            host.as_deref(),
+            podman.as_deref(),
+            &ssh_args,
+        ),
         cli::actions::Action::ProviderDelete { name } => cli::actions::provider::delete(&name),
         cli::actions::Action::Doctor => cli::actions::doctor::execute(),
     }

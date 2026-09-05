@@ -13,6 +13,7 @@ pub enum Action {
     Up {
         workspace: String,
         provider: Option<String>,
+        devcontainer: Option<String>,
     },
     /// Stop one workspace target.
     Down {
@@ -26,6 +27,8 @@ pub enum Action {
         name: String,
         provider_type: String,
         host: Option<String>,
+        podman: Option<String>,
+        ssh_args: Vec<String>,
     },
     /// Delete an unused provider.
     ProviderDelete { name: String },

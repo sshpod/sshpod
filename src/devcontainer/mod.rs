@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
@@ -9,8 +10,9 @@ use json_comments::CommentSettings;
 use serde::Deserialize;
 use serde_json::Value;
 
-const PRIMARY_CONFIG: &str = ".devcontainer/devcontainer.json";
-const ROOT_CONFIG: &str = ".devcontainer.json";
+pub(crate) const PRIMARY_CONFIG: &str = ".devcontainer/devcontainer.json";
+pub(crate) const ROOT_CONFIG: &str = ".devcontainer.json";
+pub(crate) const NESTED_CONFIG_PATTERN: &str = ".devcontainer/<folder>/devcontainer.json";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +63,21 @@ pub(crate) enum LifecycleCommand {
 pub(crate) struct LocalProject {
     pub(crate) root: PathBuf,
     pub(crate) config_directory: PathBuf,
+    pub(crate) config_path: String,
+    pub(crate) persist_selection: bool,
     pub(crate) config: DevContainer,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Selection {
+    NonInteractive,
+    Index(usize),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ConfigChoice {
+    pub(crate) path: String,
+    pub(crate) persist: bool,
 }
 
 impl DevContainer {
@@ -159,19 +175,23 @@ impl LifecycleCommand {
     }
 }
 
-pub(crate) fn discover_local(root: &Path) -> Result<LocalProject> {
+pub(crate) fn discover_local(
+    root: &Path,
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Result<LocalProject> {
     let root = root
         .canonicalize()
         .with_context(|| format!("failed to resolve workspace source {}", root.display()))?;
-    let path = config_candidates(&root)
-        .into_iter()
-        .find(|path| path.is_file())
-        .with_context(|| {
-            format!(
-                "{PRIMARY_CONFIG} not found in workspace source {} (also checked {ROOT_CONFIG})",
-                root.display()
-            )
-        })?;
+    let candidates = local_config_candidates(&root)?;
+    ensure_config_candidates(&candidates, &root.display().to_string())?;
+    let choice = choose_config(
+        &root.display().to_string(),
+        &candidates,
+        requested,
+        persisted,
+    )?;
+    let path = root.join(&choice.path);
     let contents = fs::read(&path)
         .with_context(|| format!("failed to read devcontainer config {}", path.display()))?;
     let config = DevContainer::parse(&contents, &path.display().to_string())?;
@@ -182,12 +202,66 @@ pub(crate) fn discover_local(root: &Path) -> Result<LocalProject> {
     Ok(LocalProject {
         root,
         config_directory,
+        config_path: choice.path,
+        persist_selection: choice.persist,
         config,
     })
 }
 
 pub(crate) fn config_relative_paths() -> [&'static str; 2] {
     [PRIMARY_CONFIG, ROOT_CONFIG]
+}
+
+pub(crate) fn ensure_config_candidates(candidates: &[String], source: &str) -> Result<()> {
+    ensure!(
+        !candidates.is_empty(),
+        "no Dev Container configuration found in workspace source {source:?}; checked {PRIMARY_CONFIG}, {ROOT_CONFIG}, and {NESTED_CONFIG_PATTERN}"
+    );
+    Ok(())
+}
+
+pub(crate) fn choose_config(
+    source: &str,
+    candidates: &[String],
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Result<ConfigChoice> {
+    if requested.is_some()
+        || persisted.is_some()
+        || candidates.len() <= 1
+        || candidates
+            .first()
+            .is_some_and(|path| is_standard_path(path))
+        || !io::stdin().is_terminal()
+    {
+        return select_config(
+            source,
+            candidates,
+            requested,
+            persisted,
+            Selection::NonInteractive,
+        );
+    }
+
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "Multiple Dev Container configurations found in {source:?}:\n"
+    )?;
+    for (index, path) in candidates.iter().enumerate() {
+        writeln!(stdout, "  {}. {path}", index + 1)?;
+    }
+    write!(stdout, "\nSelect configuration [1/{}]: ", candidates.len())?;
+    stdout.flush()?;
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .context("failed to read Dev Container configuration selection")?;
+    let selected = response
+        .trim()
+        .parse::<usize>()
+        .context("Dev Container configuration selection must be a number")?;
+    select_config(source, candidates, None, None, Selection::Index(selected))
 }
 
 pub(crate) fn substitute(
@@ -232,8 +306,116 @@ pub(crate) fn substitute(
     Ok(output)
 }
 
-fn config_candidates(root: &Path) -> [PathBuf; 2] {
-    [root.join(PRIMARY_CONFIG), root.join(ROOT_CONFIG)]
+fn local_config_candidates(root: &Path) -> Result<Vec<String>> {
+    let mut candidates = config_relative_paths()
+        .into_iter()
+        .filter(|relative| root.join(relative).is_file())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let nested_root = root.join(".devcontainer");
+    if !nested_root.is_dir() {
+        return Ok(candidates);
+    }
+
+    let entries = fs::read_dir(&nested_root).with_context(|| {
+        format!(
+            "failed to inspect Dev Container configurations in {}",
+            nested_root.display()
+        )
+    })?;
+    let mut nested = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to inspect Dev Container configurations in {}",
+                nested_root.display()
+            )
+        })?;
+        if entry.path().join("devcontainer.json").is_file() {
+            let folder = entry.file_name().into_string().map_err(|_| {
+                anyhow::anyhow!(
+                    "Dev Container configuration folder in {} is not valid UTF-8",
+                    nested_root.display()
+                )
+            })?;
+            nested.push(format!(".devcontainer/{folder}/devcontainer.json"));
+        }
+    }
+    nested.sort();
+    candidates.extend(nested);
+    Ok(candidates)
+}
+
+fn select_config(
+    source: &str,
+    candidates: &[String],
+    requested: Option<&str>,
+    persisted: Option<&str>,
+    selection: Selection,
+) -> Result<ConfigChoice> {
+    ensure_config_candidates(candidates, source)?;
+    if let Some(requested) = requested {
+        let path = candidates
+            .iter()
+            .find(|candidate| candidate.as_str() == requested)
+            .with_context(|| selection_error("requested", requested, source, candidates))?;
+        return Ok(ConfigChoice {
+            path: path.clone(),
+            persist: true,
+        });
+    }
+    if let Some(persisted) = persisted {
+        let path = candidates
+            .iter()
+            .find(|candidate| candidate.as_str() == persisted)
+            .with_context(|| selection_error("saved", persisted, source, candidates))?;
+        return Ok(ConfigChoice {
+            path: path.clone(),
+            persist: true,
+        });
+    }
+    if let Some(path) = candidates.first()
+        && (is_standard_path(path) || candidates.len() == 1)
+    {
+        return Ok(ConfigChoice {
+            path: path.clone(),
+            persist: false,
+        });
+    }
+    match selection {
+        Selection::NonInteractive => bail!(
+            "multiple Dev Container configurations found in {source:?}; use --config <path> to select one (available: {})",
+            candidates.join(", ")
+        ),
+        Selection::Index(index) => {
+            ensure!(
+                index > 0,
+                "Dev Container configuration selection must be between 1 and {}",
+                candidates.len()
+            );
+            let path = candidates.get(index - 1).with_context(|| {
+                format!(
+                    "Dev Container configuration selection must be between 1 and {}",
+                    candidates.len()
+                )
+            })?;
+            Ok(ConfigChoice {
+                path: path.clone(),
+                persist: true,
+            })
+        }
+    }
+}
+
+fn is_standard_path(path: &str) -> bool {
+    matches!(path, PRIMARY_CONFIG | ROOT_CONFIG)
+}
+
+fn selection_error(kind: &str, path: &str, source: &str, candidates: &[String]) -> String {
+    format!(
+        "{kind} Dev Container configuration {path:?} was not found in workspace source {source:?}; use --config <path> to select one (available: {})",
+        candidates.join(", ")
+    )
 }
 
 fn validate_mount(mount: &str, property: &str) -> Result<()> {
@@ -275,7 +457,9 @@ mod tests {
 
     use anyhow::Context;
 
-    use super::{DevContainer, LifecycleCommand, discover_local, substitute};
+    use super::{
+        DevContainer, LifecycleCommand, Selection, discover_local, select_config, substitute,
+    };
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -342,10 +526,118 @@ mod tests {
             let path = directory.join(relative);
             fs::create_dir_all(path.parent().context("test path has no parent")?)?;
             fs::write(&path, r#"{"image":"alpine"}"#)?;
-            let project = discover_local(&directory)?;
+            let project = discover_local(&directory, None, None)?;
             assert_eq!(project.config.image.as_deref(), Some("alpine"));
             fs::remove_dir_all(directory)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_nested_configs_with_standard_precedence() -> anyhow::Result<()> {
+        let directory = test_directory("nested-precedence");
+        let primary = directory.join(".devcontainer/devcontainer.json");
+        let root = directory.join(".devcontainer.json");
+        let nested = directory.join(".devcontainer/rust/devcontainer.json");
+        for path in [&primary, &root, &nested] {
+            fs::create_dir_all(path.parent().context("test path has no parent")?)?;
+            fs::write(path, r#"{"image":"alpine"}"#)?;
+        }
+
+        let project = discover_local(&directory, None, None)?;
+        assert_eq!(project.config_path, ".devcontainer/devcontainer.json");
+        assert!(!project.persist_selection);
+
+        let selected = discover_local(
+            &directory,
+            Some(".devcontainer/rust/devcontainer.json"),
+            None,
+        )?;
+        assert_eq!(selected.config_path, ".devcontainer/rust/devcontainer.json");
+        assert!(selected.persist_selection);
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn automatically_selects_one_nested_config_and_ignores_deeper_configs() -> anyhow::Result<()> {
+        let directory = test_directory("single-nested");
+        let nested = directory.join(".devcontainer/rust/devcontainer.json");
+        let deeper = directory.join(".devcontainer/rust/experimental/devcontainer.json");
+        for path in [&nested, &deeper] {
+            fs::create_dir_all(path.parent().context("test path has no parent")?)?;
+            fs::write(path, r#"{"image":"alpine"}"#)?;
+        }
+
+        let project = discover_local(&directory, None, None)?;
+        assert_eq!(project.config_path, ".devcontainer/rust/devcontainer.json");
+        assert!(!project.persist_selection);
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selects_and_persists_one_of_multiple_nested_configs() -> anyhow::Result<()> {
+        let candidates = vec![
+            ".devcontainer/go/devcontainer.json".to_owned(),
+            ".devcontainer/rust/devcontainer.json".to_owned(),
+        ];
+        let selected = select_config("/workspace", &candidates, None, None, Selection::Index(2))?;
+        assert_eq!(selected.path, ".devcontainer/rust/devcontainer.json");
+        assert!(selected.persist);
+        let saved = select_config(
+            "/workspace",
+            &candidates,
+            None,
+            Some(".devcontainer/go/devcontainer.json"),
+            Selection::NonInteractive,
+        )?;
+        assert_eq!(saved.path, ".devcontainer/go/devcontainer.json");
+        assert!(saved.persist);
+        assert!(
+            select_config(
+                "/workspace",
+                &candidates,
+                None,
+                None,
+                Selection::NonInteractive
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_requested_saved_and_any_config() -> anyhow::Result<()> {
+        let candidates = vec![".devcontainer/rust/devcontainer.json".to_owned()];
+        assert!(
+            select_config(
+                "/workspace",
+                &candidates,
+                Some(".devcontainer/go/devcontainer.json"),
+                None,
+                Selection::NonInteractive
+            )
+            .is_err()
+        );
+        assert!(
+            select_config(
+                "/workspace",
+                &candidates,
+                None,
+                Some(".devcontainer/go/devcontainer.json"),
+                Selection::NonInteractive
+            )
+            .is_err()
+        );
+        let error = select_config("/workspace", &[], None, None, Selection::NonInteractive)
+            .err()
+            .context("missing configuration should fail")?;
+        assert!(
+            error
+                .to_string()
+                .contains("checked .devcontainer/devcontainer.json")
+        );
         Ok(())
     }
 

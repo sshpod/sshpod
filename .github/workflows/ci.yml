@@ -20,6 +20,7 @@ jobs:
     uses: ./.github/workflows/security-audit.yml
   coverage:
     uses: ./.github/workflows/coverage.yml
+    secrets: inherit
   build:
     needs: test
     uses: ./.github/workflows/build.yml

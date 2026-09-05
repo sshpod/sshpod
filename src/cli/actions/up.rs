@@ -12,10 +12,20 @@ use crate::{config::Store, workspace};
 /// # Errors
 ///
 /// Returns an error when configuration, source preparation, or Podman execution fails.
-pub fn execute(workspace_name: &str, provider: Option<&str>) -> Result<()> {
+pub fn execute(
+    workspace_name: &str,
+    provider: Option<&str>,
+    devcontainer: Option<&str>,
+) -> Result<()> {
     let store = Store::discover()?;
     let current_directory = env::current_dir().context("failed to read the current directory")?;
-    let result = workspace::up(&store, workspace_name, provider, &current_directory)?;
+    let result = workspace::up(
+        &store,
+        workspace_name,
+        provider,
+        devcontainer,
+        &current_directory,
+    )?;
     let operation = if result.created {
         "created and started"
     } else {

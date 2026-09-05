@@ -29,6 +29,7 @@ fn workspace_action(matches: &ArgMatches, up: bool) -> Result<Action> {
         Ok(Action::Up {
             workspace,
             provider,
+            devcontainer: matches.get_one::<String>("config").cloned(),
         })
     } else {
         Ok(Action::Down {
@@ -45,6 +46,10 @@ fn provider_action(matches: &ArgMatches) -> Result<Action> {
             name: required_string(arguments, "name")?,
             provider_type: required_string(arguments, "type")?,
             host: arguments.get_one::<String>("host").cloned(),
+            podman: arguments.get_one::<String>("podman").cloned(),
+            ssh_args: arguments
+                .get_many::<String>("ssh-arg")
+                .map_or_else(Vec::new, |values| values.cloned().collect()),
         }),
         Some(("delete", arguments)) => Ok(Action::ProviderDelete {
             name: required_string(arguments, "name")?,
@@ -76,12 +81,15 @@ mod tests {
             "demo",
             "--provider",
             "sandbox",
+            "--config",
+            ".devcontainer/rust/devcontainer.json",
         ])?;
         assert_eq!(
             handler(&matches)?,
             Action::Up {
                 workspace: "demo".to_owned(),
-                provider: Some("sandbox".to_owned())
+                provider: Some("sandbox".to_owned()),
+                devcontainer: Some(".devcontainer/rust/devcontainer.json".to_owned())
             }
         );
         Ok(())
