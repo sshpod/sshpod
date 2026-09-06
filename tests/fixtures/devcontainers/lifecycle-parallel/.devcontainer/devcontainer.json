@@ -1,0 +1,7 @@
+{
+  "image": "alpine",
+  "postCreateCommand": {
+    "dependencies": "cargo fetch",
+    "build": ["cargo", "build"]
+  }
+}

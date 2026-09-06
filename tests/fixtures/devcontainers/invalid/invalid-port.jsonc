@@ -1,0 +1,1 @@
+{"image": "alpine", "forwardPorts": [70000, "LOCALHOST:3000"]}

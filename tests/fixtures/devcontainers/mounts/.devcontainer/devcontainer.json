@@ -1,0 +1,8 @@
+{
+  "image": "alpine",
+  "workspaceMount": "type=bind,source=${localWorkspaceFolder},target=/workspace",
+  "mounts": [
+    "type=volume,source=cache,target=/cache",
+    {"type": "bind", "source": "${localWorkspaceFolder}/data", "target": "/data"}
+  ]
+}

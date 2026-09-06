@@ -1,0 +1,9 @@
+{
+  "image": "alpine",
+  "forwardPorts": [3000, "database:5432"],
+  "portsAttributes": {
+    "3000": {"label": "Web", "protocol": "http", "onAutoForward": "openBrowserOnce"}
+  },
+  "otherPortsAttributes": {"onAutoForward": "silent"},
+  "appPort": [8080, "127.0.0.1:9000:9001"]
+}

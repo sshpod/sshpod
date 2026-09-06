@@ -1,0 +1,8 @@
+{
+  "image": "${localEnv:DEVCONTAINER_IMAGE:alpine:latest}",
+  "workspaceFolder": "${containerWorkspaceFolder}",
+  "containerEnv": {
+    "HOME_FROM_HOST": "${localEnv:HOME}",
+    "ROOT": "${localWorkspaceFolder}"
+  }
+}

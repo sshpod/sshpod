@@ -1,0 +1,1 @@
+{"image": "alpine", "postCreateCommand": "cargo build"}

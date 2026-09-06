@@ -25,8 +25,8 @@ flowchart TD
     remote --> discover
     discover --> found{Configuration found?}
     found -->|No| error["Stop with an actionable error"]
-    found -->|Yes| parse["Parse JSONC and validate the supported metadata"]
-    parse --> valid{Configuration supported?}
+    found -->|Yes| parse["Parse, validate, and normalize devcontainer.json"]
+    parse --> valid{Runtime behavior implemented?}
     valid -->|No| error
     valid -->|Yes| initialize["Check Podman and run initializeCommand"]
     initialize --> image{Image source}
@@ -184,28 +184,38 @@ state.
 
 ## Dev Container support
 
-The current parser accepts JSON with C/C++-style comments and rejects unknown
-properties rather than pretending to support them. It currently supports:
+Dev Container parsing is independent from Podman orchestration. The public
+`sshpod::devcontainer` module discovers every specification-defined candidate,
+parses strict JSONC (`//` and `/* ... */` comments), validates known properties,
+and returns a normalized model with the configuration path and directory.
 
-- specification-order discovery of `.devcontainer/devcontainer.json`,
-  `.devcontainer.json`, and one-level nested configurations
-- `name`, `image`, and simple `build.dockerfile` / `build.context`
-- `workspaceFolder`, a bind-only `workspaceMount`, and string-form bind `mounts`
-- `containerEnv`, `remoteEnv`, `containerUser`, and `remoteUser`
-- string or argv-array forms of `initializeCommand`, `onCreateCommand`,
-  `updateContentCommand`, `postCreateCommand`, and `postStartCommand`
-- basic `${localWorkspaceFolder}`, workspace basename, container workspace folder,
-  `${localEnv:NAME}`, and `${env:NAME}` substitution
+The parser models the current official base schema, including image, Dockerfile
+and Compose sources; runtime, workspace, environment and user fields; port and
+mount unions; all lifecycle command representations; Features and install order;
+host requirements; secrets; and customizations. Variable expressions are retained
+verbatim for a later resolution phase. Unknown top-level properties are preserved
+and reported as warnings for forward compatibility; malformed known properties
+remain errors. Relative build and Compose paths are not resolved during parsing,
+so the runtime planner can apply the specification's path semantics later.
+
+This parser coverage does not imply that the current Podman runtime implements
+every parsed property. Before any Podman call or workspace-state write, `sshpod
+up` rejects valid configurations that request unimplemented runtime behavior. The
+current execution subset remains image and simple Dockerfile sources, string-form
+mounts, environments/users, workspace paths, and non-parallel lifecycle commands
+through `postStartCommand`.
 
 `initializeCommand` runs on the selected host. The other lifecycle commands run
 inside the container in their basic specification order. On SSH providers, host
 and Podman commands execute through the configured OpenSSH host.
 
-Not yet supported: lifecycle command objects, Dev Container Features,
-`customizations`, Compose configurations, build arguments/options, non-bind mount
-forms, ports/forwarding, `postAttachCommand`, full variable substitution, source
-synchronization, container reconciliation after configuration changes, or the
-remaining Dev Container specification.
+Not yet executed by the runtime: lifecycle command objects, Dev Container Feature
+installation, Compose configurations, build target/arguments/cache/options,
+object-form mounts, ports/forwarding, `postAttachCommand`, `waitFor`, user UID
+updates and environment probing, host-requirement enforcement, full variable
+resolution, source synchronization, and container reconciliation after
+configuration changes. Customizations, secrets, and unknown extensions are parsed
+as metadata but have no runtime action.
 
 ## Direction and scope
 
@@ -232,7 +242,7 @@ compatibility have been validated.
 - [x] Discover `.devcontainer/devcontainer.json`
 - [x] Discover `.devcontainer.json`
 - [x] Discover `.devcontainer/<folder>/devcontainer.json`
-- [ ] Parse JSONC and validate the Dev Container configuration
+- [x] Parse JSONC and validate the Dev Container configuration
 - [ ] Environment-variable substitution
 - [ ] Deterministic workspace/container naming
 
@@ -292,6 +302,9 @@ separate modules. There is no async runtime or generic provider/plugin layer.
 
 Run `just test` for formatting, checking, tests, and strict Clippy. Ordinary tests
 need neither Podman nor SSH. `just ci` additionally runs dependency policy checks.
+The parser conformance suite uses a pinned, offline copy of the official base
+schema; `just devcontainer-schema-check` is the opt-in network check for upstream
+schema drift.
 
 ```sh
 cargo fmt --check

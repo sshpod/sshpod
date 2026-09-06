@@ -11,7 +11,10 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::{
     config::{Config, Store, WorkspaceTarget},
-    devcontainer::{self, DevContainer, LocalProject},
+    devcontainer::{
+        self, ConfigOrigin, ContainerSource, Diagnostic, LifecycleCommand, Mount,
+        NormalizedDevContainer,
+    },
     podman::{self, ContainerSpec},
     provider::{Executor, Provider, validate_name},
 };
@@ -50,6 +53,7 @@ pub(crate) struct UpResult {
     pub(crate) provider: String,
     pub(crate) container: String,
     pub(crate) created: bool,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug)]
@@ -70,27 +74,35 @@ struct ResolvedTarget {
 
 #[derive(Debug)]
 enum Project {
-    Local(LocalProject),
+    Local {
+        root: PathBuf,
+        config_directory: PathBuf,
+        config_path: String,
+        persist_selection: bool,
+        config: NormalizedDevContainer,
+    },
     Remote {
         root: String,
         config_directory: String,
         config_path: String,
         persist_selection: bool,
-        config: DevContainer,
+        config: NormalizedDevContainer,
     },
 }
 
 impl Project {
     fn root(&self) -> String {
         match self {
-            Self::Local(project) => project.root.display().to_string(),
+            Self::Local { root, .. } => root.display().to_string(),
             Self::Remote { root, .. } => root.clone(),
         }
     }
 
     fn config_directory(&self) -> String {
         match self {
-            Self::Local(project) => project.config_directory.display().to_string(),
+            Self::Local {
+                config_directory, ..
+            } => config_directory.display().to_string(),
             Self::Remote {
                 config_directory, ..
             } => config_directory.clone(),
@@ -99,24 +111,24 @@ impl Project {
 
     fn config_path(&self) -> &str {
         match self {
-            Self::Local(project) => &project.config_path,
-            Self::Remote { config_path, .. } => config_path,
+            Self::Local { config_path, .. } | Self::Remote { config_path, .. } => config_path,
         }
     }
 
     const fn persist_selection(&self) -> bool {
         match self {
-            Self::Local(project) => project.persist_selection,
-            Self::Remote {
+            Self::Local {
+                persist_selection, ..
+            }
+            | Self::Remote {
                 persist_selection, ..
             } => *persist_selection,
         }
     }
 
-    const fn config(&self) -> &DevContainer {
+    const fn config(&self) -> &NormalizedDevContainer {
         match self {
-            Self::Local(project) => &project.config,
-            Self::Remote { config, .. } => config,
+            Self::Local { config, .. } | Self::Remote { config, .. } => config,
         }
     }
 }
@@ -145,6 +157,7 @@ pub(crate) fn up(
         requested_devcontainer,
         target.devcontainer.as_deref(),
     )?;
+    ensure_runtime_supported(project.config())?;
     if project.persist_selection() {
         let configured_target = config
             .workspaces
@@ -411,13 +424,38 @@ fn load_project(
     persisted: Option<&str>,
 ) -> Result<Project> {
     match executor.provider() {
-        Provider::Local { .. } => Ok(Project::Local(devcontainer::discover_local(
-            Path::new(source),
-            requested,
-            persisted,
-        )?)),
+        Provider::Local { .. } => load_local_project(source, requested, persisted),
         Provider::Ssh { .. } => load_remote_project(executor, source, requested, persisted),
     }
+}
+
+fn load_local_project(
+    source: &str,
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Result<Project> {
+    let candidates = devcontainer::discover(Path::new(source))?;
+    let paths = candidates
+        .iter()
+        .map(|candidate| candidate.relative_path.clone())
+        .collect::<Vec<_>>();
+    ensure_config_candidates(&paths, source)?;
+    let choice = selection::choose_config(source, &paths, requested, persisted)?;
+    let candidate = candidates
+        .iter()
+        .find(|candidate| candidate.relative_path == choice.path)
+        .context("selected Dev Container configuration disappeared")?;
+    let parsed = devcontainer::load_candidate(candidate)?;
+    let config_directory = parsed.origin.config_dir.clone();
+    let root = candidate.workspace_root.clone();
+    let config = parsed.validate()?;
+    Ok(Project::Local {
+        root,
+        config_directory,
+        config_path: choice.path,
+        persist_selection: choice.persist,
+        config,
+    })
 }
 
 fn load_remote_project(
@@ -427,11 +465,12 @@ fn load_remote_project(
     persisted: Option<&str>,
 ) -> Result<Project> {
     let candidates = remote_config_candidates(executor, source)?;
-    devcontainer::ensure_config_candidates(&candidates, source)?;
-    let choice = devcontainer::choose_config(source, &candidates, requested, persisted)?;
+    ensure_config_candidates(&candidates, source)?;
+    let choice = selection::choose_config(source, &candidates, requested, persisted)?;
     let path = join_path(source, &choice.path);
     let contents = executor.run("cat", std::slice::from_ref(&path))?;
-    let config = DevContainer::parse(contents.as_bytes(), &path)?;
+    let origin = ConfigOrigin::from_path(PathBuf::from(&path), Some(PathBuf::from(source)));
+    let config = devcontainer::parse_bytes(origin, contents.as_bytes())?.validate()?;
     let config_directory = Path::new(&path)
         .parent()
         .context("remote devcontainer path has no parent")?
@@ -444,6 +483,17 @@ fn load_remote_project(
         persist_selection: choice.persist,
         config,
     })
+}
+
+fn ensure_config_candidates(candidates: &[String], source: &str) -> Result<()> {
+    ensure!(
+        !candidates.is_empty(),
+        "no Dev Container configuration found in workspace source {source:?}; checked {}, {}, and {}",
+        devcontainer::PRIMARY_CONFIG,
+        devcontainer::ROOT_CONFIG,
+        devcontainer::NESTED_CONFIG_PATTERN
+    );
+    Ok(())
 }
 
 fn remote_config_candidates(executor: &Executor, source: &str) -> Result<Vec<String>> {
@@ -528,6 +578,121 @@ fn is_nested_config_path(path: &str) -> bool {
     )
 }
 
+/// Keep schema support separate from runtime support. Parsing a valid Dev
+/// Container configuration must not silently discard behavior that the current
+/// Podman orchestration layer cannot honor yet.
+fn ensure_runtime_supported(config: &NormalizedDevContainer) -> Result<()> {
+    let mut unsupported = Vec::new();
+
+    match &config.source {
+        ContainerSource::Image(_) => {}
+        ContainerSource::Build(build) => {
+            if build.target.is_some() {
+                unsupported.push("build.target");
+            }
+            if !build.args.is_empty() {
+                unsupported.push("build.args");
+            }
+            if !build.cache_from.is_empty() {
+                unsupported.push("build.cacheFrom");
+            }
+            if !build.options.is_empty() {
+                unsupported.push("build.options");
+            }
+            if !build.extensions.is_empty() {
+                unsupported.push("unknown legacy build options");
+            }
+        }
+        ContainerSource::Compose(_) => unsupported.push("dockerComposeFile"),
+        ContainerSource::Unspecified => unsupported.push("an image or Dockerfile source"),
+    }
+
+    if !config.runtime.run_args.is_empty() {
+        unsupported.push("runArgs");
+    }
+    if config.runtime.override_command == Some(false) {
+        unsupported.push("overrideCommand=false");
+    }
+    if config.explicitly_set.contains("shutdownAction") {
+        unsupported.push("shutdownAction");
+    }
+    if config.runtime.init {
+        unsupported.push("init");
+    }
+    if config.runtime.privileged {
+        unsupported.push("privileged");
+    }
+    if !config.runtime.cap_add.is_empty() {
+        unsupported.push("capAdd");
+    }
+    if !config.runtime.security_opt.is_empty() {
+        unsupported.push("securityOpt");
+    }
+    if config
+        .workspace
+        .mounts
+        .iter()
+        .any(|mount| matches!(mount, Mount::Object { .. }))
+    {
+        unsupported.push("object-form mounts");
+    }
+    if !config.ports.forward.is_empty()
+        || !config.ports.attributes.is_empty()
+        || config.ports.other_attributes.is_some()
+        || !config.ports.app.is_empty()
+    {
+        unsupported.push("port configuration");
+    }
+    if !config.features.declarations.is_empty()
+        || !config.features.override_install_order.is_empty()
+    {
+        unsupported.push("Features");
+    }
+    if config.host_requirements.is_some() {
+        unsupported.push("hostRequirements");
+    }
+    if config.lifecycle.post_attach.is_some() {
+        unsupported.push("postAttachCommand");
+    }
+    if config.explicitly_set.contains("waitFor") {
+        unsupported.push("waitFor");
+    }
+    if config.explicitly_set.contains("updateRemoteUserUID") {
+        unsupported.push("updateRemoteUserUID");
+    }
+    if config.explicitly_set.contains("userEnvProbe") {
+        unsupported.push("userEnvProbe");
+    }
+    if config.environment.remote.values().any(Option::is_none) {
+        unsupported.push("null remoteEnv values");
+    }
+    append_parallel_lifecycle(config, &mut unsupported);
+
+    ensure!(
+        unsupported.is_empty(),
+        "Dev Container configuration parsed successfully, but sshpod's container runtime does not support yet: {}",
+        unsupported.join(", ")
+    );
+    Ok(())
+}
+
+fn append_parallel_lifecycle(config: &NormalizedDevContainer, unsupported: &mut Vec<&'static str>) {
+    for (name, command) in [
+        ("initializeCommand", config.lifecycle.initialize.as_ref()),
+        ("onCreateCommand", config.lifecycle.on_create.as_ref()),
+        (
+            "updateContentCommand",
+            config.lifecycle.update_content.as_ref(),
+        ),
+        ("postCreateCommand", config.lifecycle.post_create.as_ref()),
+        ("postStartCommand", config.lifecycle.post_start.as_ref()),
+    ] {
+        if command.is_some_and(|command| matches!(command, LifecycleCommand::Parallel(_))) {
+            unsupported.push(name);
+        }
+    }
+}
+
 fn start_project(
     executor: &Executor,
     workspace: &str,
@@ -540,15 +705,19 @@ fn start_project(
     let container = container_name(workspace, provider);
     let mounts = resolved_mounts(config, &source, &workspace_folder, workspace)?;
     let container_environment = resolved_container_environment(
-        &config.container_env,
+        &config.environment.container,
         &source,
         &workspace_folder,
         workspace,
     )?;
-    let remote_environment =
-        resolved_remote_environment(&config.remote_env, &source, &workspace_folder, workspace)?;
+    let remote_environment = resolved_remote_environment(
+        &config.environment.remote,
+        &source,
+        &workspace_folder,
+        workspace,
+    )?;
 
-    lifecycle::run_host(executor, &source, config.initialize_command.as_ref())?;
+    lifecycle::run_host(executor, &source, config.lifecycle.initialize.as_ref())?;
     let state = podman::container_status(executor, &container)?;
     let created = state == ContainerState::Missing;
     if created {
@@ -562,23 +731,23 @@ fn start_project(
                 image: &image,
                 mounts: &mounts,
                 environment: &container_environment,
-                user: config.container_user.as_deref(),
+                user: config.environment.container_user.as_deref(),
             },
         )?;
         podman::start(executor, &container)?;
         for (name, command) in [
-            ("onCreateCommand", config.on_create_command.as_ref()),
+            ("onCreateCommand", config.lifecycle.on_create.as_ref()),
             (
                 "updateContentCommand",
-                config.update_content_command.as_ref(),
+                config.lifecycle.update_content.as_ref(),
             ),
-            ("postCreateCommand", config.post_create_command.as_ref()),
+            ("postCreateCommand", config.lifecycle.post_create.as_ref()),
         ] {
             lifecycle::run_container(
                 executor,
                 &container,
                 &workspace_folder,
-                config.remote_user.as_deref(),
+                config.environment.remote_user.as_deref(),
                 &remote_environment,
                 name,
                 command,
@@ -591,16 +760,17 @@ fn start_project(
         executor,
         &container,
         &workspace_folder,
-        config.remote_user.as_deref(),
+        config.environment.remote_user.as_deref(),
         &remote_environment,
         "postStartCommand",
-        config.post_start_command.as_ref(),
+        config.lifecycle.post_start.as_ref(),
     )?;
     Ok(UpResult {
         workspace: workspace.to_owned(),
         provider: provider.to_owned(),
         container,
         created,
+        diagnostics: config.diagnostics.clone(),
     })
 }
 
@@ -611,13 +781,12 @@ fn resolve_image(
     project: &Project,
 ) -> Result<String> {
     let config = project.config();
-    if let Some(image) = &config.image {
-        return Ok(image.clone());
-    }
-    let build = config
-        .build
-        .as_ref()
-        .context("validated build configuration is missing")?;
+    let ContainerSource::Build(build) = &config.source else {
+        if let ContainerSource::Image(image) = &config.source {
+            return Ok(image.clone());
+        }
+        bail!("runtime requires an image or Dockerfile source");
+    };
     let directory = project.config_directory();
     let dockerfile = join_path(&directory, &build.dockerfile);
     let context = join_path(&directory, &build.context);
@@ -627,17 +796,17 @@ fn resolve_image(
 }
 
 fn substituted_workspace_folder(
-    config: &DevContainer,
+    config: &NormalizedDevContainer,
     source: &str,
     workspace: &str,
 ) -> Result<String> {
     let default = format!("/workspaces/{}", sanitize(workspace));
-    let value = config.workspace_folder.as_deref().unwrap_or(&default);
+    let value = config.workspace.folder.as_deref().unwrap_or(&default);
     devcontainer::substitute(value, source, &default, workspace)
 }
 
 fn resolved_mounts(
-    config: &DevContainer,
+    config: &NormalizedDevContainer,
     source: &str,
     workspace_folder: &str,
     workspace: &str,
@@ -646,14 +815,16 @@ fn resolved_mounts(
         !source.contains(','),
         "workspace source paths containing commas are not supported yet"
     );
-    let workspace_mount = if let Some(mount) = &config.workspace_mount {
+    let workspace_mount = if let Some(mount) = &config.workspace.mount {
         devcontainer::substitute(mount, source, workspace_folder, workspace)?
     } else {
         format!("type=bind,source={source},target={workspace_folder}")
     };
     let mut mounts = vec![workspace_mount];
-    for mount in &config.mounts {
-        let mount = mount.as_str().context("validated mount is not a string")?;
+    for mount in &config.workspace.mounts {
+        let Mount::String(mount) = mount else {
+            bail!("object-form mounts are not supported by the runtime yet");
+        };
         mounts.push(devcontainer::substitute(
             mount,
             source,
@@ -764,7 +935,13 @@ fn is_git_source(source: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{container_name, is_git_source, parse_nested_candidates};
+    use std::path::PathBuf;
+
+    use anyhow::Context;
+
+    use crate::devcontainer::{ConfigOrigin, parse_bytes};
+
+    use super::{container_name, ensure_runtime_supported, is_git_source, parse_nested_candidates};
 
     #[test]
     fn deterministic_container_names_include_provider() {
@@ -797,6 +974,27 @@ mod tests {
             ]
         );
         assert!(parse_nested_candidates(".devcontainer/rust/deeper/devcontainer.json").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_gate_accepts_simple_images_and_rejects_parsed_features() -> anyhow::Result<()> {
+        let simple = parse_bytes(
+            ConfigOrigin::from_path(PathBuf::from("simple.jsonc"), None),
+            br#"{"image":"alpine"}"#,
+        )?
+        .validate()?;
+        ensure_runtime_supported(&simple)?;
+
+        let features = parse_bytes(
+            ConfigOrigin::from_path(PathBuf::from("features.jsonc"), None),
+            br#"{"image":"alpine","features":{"example/feature:1":{}}}"#,
+        )?
+        .validate()?;
+        let error = ensure_runtime_supported(&features)
+            .err()
+            .context("Features should be rejected by the runtime gate")?;
+        assert!(error.to_string().contains("Features"));
         Ok(())
     }
 }

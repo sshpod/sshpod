@@ -2,7 +2,7 @@
 
 pub mod cli;
 mod config;
-mod devcontainer;
+pub mod devcontainer;
 pub mod podman;
 mod provider;
 mod workspace;

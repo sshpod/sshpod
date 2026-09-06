@@ -1,0 +1,4 @@
+Source: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/schemas/devContainer.base.schema.json
+Commit: c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421
+SHA-256: a0883c0405ff433db188849d458fb20b9c0d73e0ba1a6e44c1d83f3b485408dd
+License: MIT (https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/LICENSE)

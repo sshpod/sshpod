@@ -1,0 +1,6 @@
+{
+  // Development image
+  "image": "rust:latest",
+  /* Strings that look like comments must stay unchanged. */
+  "containerEnv": {"URL": "https://example.com/path/*literal*/"}
+}

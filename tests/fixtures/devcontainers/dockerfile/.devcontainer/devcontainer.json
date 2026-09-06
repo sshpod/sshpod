@@ -1,0 +1,10 @@
+{
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "..",
+    "target": "development",
+    "args": {"RUST_VERSION": "stable"},
+    "cacheFrom": ["rust:latest"],
+    "options": ["--pull"]
+  }
+}

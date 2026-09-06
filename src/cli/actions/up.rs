@@ -26,6 +26,15 @@ pub fn execute(
         devcontainer,
         &current_directory,
     )?;
+    let mut stderr = io::stderr().lock();
+    for diagnostic in &result.diagnostics {
+        writeln!(
+            stderr,
+            "{}[{}] {}: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.path, diagnostic.message
+        )
+        .context("failed to write Dev Container warning")?;
+    }
     let operation = if result.created {
         "created and started"
     } else {

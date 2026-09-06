@@ -1,0 +1,9 @@
+{
+  "image": "alpine",
+  "containerEnv": {"MODE": "development"},
+  "remoteEnv": {"PATH": "${containerEnv:PATH}:/tools/bin", "REMOVED": null},
+  "containerUser": "developer",
+  "remoteUser": "developer",
+  "updateRemoteUserUID": false,
+  "userEnvProbe": "loginShell"
+}

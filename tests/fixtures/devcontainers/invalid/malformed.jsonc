@@ -1,0 +1,5 @@
+{
+  // Missing comma on the next line is deliberately invalid.
+  "image": "alpine"
+  "name": "broken"
+}

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use crate::{devcontainer::LifecycleCommand, podman, provider::Executor};
 
 #[cfg(test)]
-use crate::devcontainer::DevContainer;
+use crate::devcontainer::NormalizedDevContainer;
 
 pub(crate) fn run_host(
     executor: &Executor,
@@ -47,26 +47,29 @@ pub(crate) fn run_container(
 }
 
 #[cfg(test)]
-pub(crate) fn command_order(config: &DevContainer, new_container: bool) -> Vec<&'static str> {
+pub(crate) fn command_order(
+    config: &NormalizedDevContainer,
+    new_container: bool,
+) -> Vec<&'static str> {
     let mut order = Vec::new();
-    if config.initialize_command.is_some() {
+    if config.lifecycle.initialize.is_some() {
         order.push("initializeCommand");
     }
     if new_container {
         for (name, command) in [
-            ("onCreateCommand", config.on_create_command.as_ref()),
+            ("onCreateCommand", config.lifecycle.on_create.as_ref()),
             (
                 "updateContentCommand",
-                config.update_content_command.as_ref(),
+                config.lifecycle.update_content.as_ref(),
             ),
-            ("postCreateCommand", config.post_create_command.as_ref()),
+            ("postCreateCommand", config.lifecycle.post_create.as_ref()),
         ] {
             if command.is_some() {
                 order.push(name);
             }
         }
     }
-    if config.post_start_command.is_some() {
+    if config.lifecycle.post_start.is_some() {
         order.push("postStartCommand");
     }
     order
@@ -77,7 +80,7 @@ fn command_parts(command: &LifecycleCommand) -> Result<(String, Vec<String>)> {
         LifecycleCommand::Shell(command) => {
             Ok(("/bin/sh".to_owned(), vec!["-c".to_owned(), command.clone()]))
         }
-        LifecycleCommand::Direct(command) => {
+        LifecycleCommand::Exec(command) => {
             let (program, args) = command
                 .split_first()
                 .context("lifecycle command array is empty")?;
@@ -91,13 +94,16 @@ fn command_parts(command: &LifecycleCommand) -> Result<(String, Vec<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use crate::devcontainer::DevContainer;
+    use std::path::PathBuf;
+
+    use crate::devcontainer::{ConfigOrigin, parse_bytes};
 
     use super::command_order;
 
     #[test]
     fn lifecycle_order_distinguishes_create_and_start() -> anyhow::Result<()> {
-        let config = DevContainer::parse(
+        let config = parse_bytes(
+            ConfigOrigin::from_path(PathBuf::from("test.json"), None),
             br#"{
                 "image":"alpine",
                 "initializeCommand":"true",
@@ -106,8 +112,8 @@ mod tests {
                 "postCreateCommand":"true",
                 "postStartCommand":"true"
             }"#,
-            "test",
-        )?;
+        )?
+        .validate()?;
         assert_eq!(
             command_order(&config, true),
             [

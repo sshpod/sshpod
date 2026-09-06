@@ -1,0 +1,6 @@
+{
+  "image": "alpine",
+  "dockerComposeFile": "compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace"
+}

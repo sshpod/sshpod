@@ -2,10 +2,137 @@ use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail, ensure};
 
+use crate::devcontainer::{PRIMARY_CONFIG, ROOT_CONFIG};
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Selection {
     NonInteractive,
     Index(usize),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ConfigChoice {
+    pub(crate) path: String,
+    pub(crate) persist: bool,
+}
+
+pub(crate) fn choose_config(
+    source: &str,
+    candidates: &[String],
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Result<ConfigChoice> {
+    if requested.is_some()
+        || persisted.is_some()
+        || candidates.len() <= 1
+        || candidates
+            .first()
+            .is_some_and(|path| is_standard_path(path))
+        || !io::stdin().is_terminal()
+    {
+        return select_config(
+            source,
+            candidates,
+            requested,
+            persisted,
+            Selection::NonInteractive,
+        );
+    }
+
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "Multiple Dev Container configurations found in {source:?}:\n"
+    )?;
+    for (index, path) in candidates.iter().enumerate() {
+        writeln!(stdout, "  {}. {path}", index + 1)?;
+    }
+    write!(stdout, "\nSelect configuration [1/{}]: ", candidates.len())?;
+    stdout.flush()?;
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .context("failed to read Dev Container configuration selection")?;
+    let selected = response
+        .trim()
+        .parse::<usize>()
+        .context("Dev Container configuration selection must be a number")?;
+    select_config(source, candidates, None, None, Selection::Index(selected))
+}
+
+pub(crate) fn select_config(
+    source: &str,
+    candidates: &[String],
+    requested: Option<&str>,
+    persisted: Option<&str>,
+    selection: Selection,
+) -> Result<ConfigChoice> {
+    ensure!(
+        !candidates.is_empty(),
+        "no Dev Container configuration found in workspace source {source:?}"
+    );
+    if let Some(requested) = requested {
+        let path = candidates
+            .iter()
+            .find(|candidate| candidate.as_str() == requested)
+            .with_context(|| selection_error("requested", requested, source, candidates))?;
+        return Ok(ConfigChoice {
+            path: path.clone(),
+            persist: true,
+        });
+    }
+    if let Some(persisted) = persisted {
+        let path = candidates
+            .iter()
+            .find(|candidate| candidate.as_str() == persisted)
+            .with_context(|| selection_error("saved", persisted, source, candidates))?;
+        return Ok(ConfigChoice {
+            path: path.clone(),
+            persist: true,
+        });
+    }
+    if let Some(path) = candidates.first()
+        && (is_standard_path(path) || candidates.len() == 1)
+    {
+        return Ok(ConfigChoice {
+            path: path.clone(),
+            persist: false,
+        });
+    }
+    match selection {
+        Selection::NonInteractive => bail!(
+            "multiple Dev Container configurations found in {source:?}; use --config <path> to select one (available: {})",
+            candidates.join(", ")
+        ),
+        Selection::Index(index) => {
+            ensure!(
+                index > 0,
+                "Dev Container configuration selection must be between 1 and {}",
+                candidates.len()
+            );
+            let path = candidates.get(index - 1).with_context(|| {
+                format!(
+                    "Dev Container configuration selection must be between 1 and {}",
+                    candidates.len()
+                )
+            })?;
+            Ok(ConfigChoice {
+                path: path.clone(),
+                persist: true,
+            })
+        }
+    }
+}
+
+fn is_standard_path(path: &str) -> bool {
+    matches!(path, PRIMARY_CONFIG | ROOT_CONFIG)
+}
+
+fn selection_error(kind: &str, path: &str, source: &str, candidates: &[String]) -> String {
+    format!(
+        "{kind} Dev Container configuration {path:?} was not found in workspace source {source:?}; use --config <path> to select one (available: {})",
+        candidates.join(", ")
+    )
 }
 
 pub(crate) fn choose_provider(
@@ -80,7 +207,7 @@ pub(crate) fn select_provider(
 
 #[cfg(test)]
 mod tests {
-    use super::{Selection, select_provider};
+    use super::{Selection, select_config, select_provider};
 
     fn candidates() -> Vec<String> {
         vec!["local".to_owned(), "sandbox".to_owned()]
@@ -128,6 +255,38 @@ mod tests {
         );
         assert!(select_provider("demo", &candidates(), None, Selection::Index(0)).is_err());
         assert!(select_provider("demo", &candidates(), None, Selection::Index(3)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn selects_requested_and_nested_devcontainer_configs() -> anyhow::Result<()> {
+        let configs = vec![
+            ".devcontainer/go/devcontainer.json".to_owned(),
+            ".devcontainer/rust/devcontainer.json".to_owned(),
+        ];
+        let requested = select_config(
+            "/workspace",
+            &configs,
+            Some(".devcontainer/rust/devcontainer.json"),
+            None,
+            Selection::NonInteractive,
+        )?;
+        assert_eq!(requested.path, ".devcontainer/rust/devcontainer.json");
+        assert!(requested.persist);
+
+        let interactive = select_config("/workspace", &configs, None, None, Selection::Index(1))?;
+        assert_eq!(interactive.path, ".devcontainer/go/devcontainer.json");
+        assert!(interactive.persist);
+        assert!(
+            select_config(
+                "/workspace",
+                &configs,
+                None,
+                None,
+                Selection::NonInteractive
+            )
+            .is_err()
+        );
         Ok(())
     }
 }
