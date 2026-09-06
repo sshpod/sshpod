@@ -35,11 +35,3 @@ deny:
     cargo deny --all-features check
 
 ci: test deny
-
-# Run on a clean, committed tree. Neither command publishes.
-package: test
-    cargo package --locked
-    cargo package --locked --list
-
-release-check: package
-    cargo publish --dry-run --locked
