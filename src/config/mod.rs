@@ -7,13 +7,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use noyalib::{DuplicateKeyPolicy, ParserConfig, SerializerConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{Provider, validate_name};
 
 const CONFIG_DIRECTORY: &str = "sshpod";
 const CONFIG_FILENAME: &str = "config.yaml";
+
+/// Explicit YAML document start written by every sshpod release; the emitter
+/// omits it, so keep on-disk configuration shape stable by prefixing it.
+const DOCUMENT_START: &str = "---\n";
 
 /// Persistent sshpod configuration and workspace state.
 #[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,8 +98,12 @@ impl Config {
                 return Err(error).with_context(|| format!("failed to read {}", path.display()));
             }
         };
-        let parser = ParserConfig::new().duplicate_key_policy(DuplicateKeyPolicy::Error);
-        let config: Self = noyalib::from_str_with_config(&contents, &parser)
+        // Parse to a YAML document first: `Mapping` rejects duplicate keys at every
+        // level, whereas deserializing straight into `BTreeMap` would silently keep
+        // the last occurrence and hide a conflicting provider or workspace entry.
+        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&contents)
+            .with_context(|| format!("failed to parse sshpod config {}", path.display()))?;
+        let config = Self::deserialize(document)
             .with_context(|| format!("failed to parse sshpod config {}", path.display()))?;
         config
             .validate()
@@ -125,9 +132,11 @@ impl Config {
         })?;
         set_private_directory_permissions(parent, create_directory)?;
 
-        let serializer = SerializerConfig::new().document_start(true);
-        let contents = noyalib::to_string_with_config(self, &serializer)
+        let body = serde_yaml_ng::to_string(self)
             .with_context(|| format!("failed to serialize sshpod config {}", path.display()))?;
+        let mut contents = String::with_capacity(DOCUMENT_START.len() + body.len());
+        contents.push_str(DOCUMENT_START);
+        contents.push_str(&body);
         let temporary = path.with_extension("yaml.tmp");
         write_private_file(&temporary, contents.as_bytes())?;
         fs::rename(&temporary, path)
