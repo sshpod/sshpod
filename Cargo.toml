@@ -17,7 +17,7 @@ exclude = [".github/**"]
 anyhow = "1"
 clap = "4.6"
 indexmap = { version = "2.14", features = ["serde"] }
-jsonc-parser = { version = "0.33", features = ["error_unicode_width", "serde"] }
+jsonc-parser = { version = "0.34", features = ["error_unicode_width", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
