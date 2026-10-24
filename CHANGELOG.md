@@ -10,7 +10,8 @@ may be combined or rewritten as the prototype evolves.
 
 - Swapped the YAML configuration backend from `serde_yaml_ng` to `serde-saphyr`
   to drop the unmaintained `unsafe-libyaml` C dependency (RUSTSEC-2024-0449);
-  duplicate mapping keys are now rejected during the single typed parse.
+  duplicate mapping keys are now rejected during the single typed parse, and
+  YAML 1.1 boolean spellings such as `host: no` remain strings.
 - Bumped `rust-version` to 1.89, `jsonc-parser` to 0.34, and `jsonschema` to
   0.60.
 

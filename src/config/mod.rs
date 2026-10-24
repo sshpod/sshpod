@@ -101,8 +101,18 @@ impl Config {
         // serde-saphyr rejects duplicate mapping keys by default, so a
         // conflicting provider or workspace entry fails the load outright
         // instead of silently keeping one occurrence.
-        let config = serde_saphyr::from_str::<Self>(&contents)
-            .with_context(|| format!("failed to parse sshpod config {}", path.display()))?;
+        //
+        // Configuration values are strings; strict booleans keep YAML 1.1
+        // spellings such as `host: no` from being coerced to false and
+        // rejected as a type error. The serializer quotes such values, so
+        // files written by sshpod always round-trip.
+        let config = serde_saphyr::from_str_with_options::<Self>(
+            &contents,
+            serde_saphyr::options! {
+                strict_booleans: true,
+            },
+        )
+        .with_context(|| format!("failed to parse sshpod config {}", path.display()))?;
         config
             .validate()
             .with_context(|| format!("invalid sshpod config {}", path.display()))?;
@@ -438,6 +448,21 @@ mod tests {
         ] {
             assert!(parse(name, yaml).is_err());
         }
+    }
+
+    #[test]
+    fn parses_yaml_11_boolean_spellings_as_strings() -> anyhow::Result<()> {
+        for host in ["no", "yes", "on", "off", "n", "y"] {
+            let config = parse(
+                &format!("bool-host-{host}"),
+                &format!("providers:\n  sandbox:\n    type: ssh\n    host: {host}\n"),
+            )?;
+            let Some(Provider::Ssh { host: parsed, .. }) = config.provider("sandbox") else {
+                anyhow::bail!("expected an SSH provider for host spelling {host:?}");
+            };
+            assert_eq!(parsed, host);
+        }
+        Ok(())
     }
 
     #[test]
