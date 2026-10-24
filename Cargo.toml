@@ -2,7 +2,7 @@
 name = "sshpod"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Nicolas Embriz <nbari@tequila.io>"]
 description = "Podman development workspaces, locally or over SSH"
 repository = "https://github.com/sshpod/sshpod"
@@ -17,13 +17,13 @@ exclude = [".github/**"]
 anyhow = "1"
 clap = "4.6"
 indexmap = { version = "2.14", features = ["serde"] }
-jsonc-parser = { version = "0.33", features = ["error_unicode_width", "serde"] }
+jsonc-parser = { version = "0.34", features = ["error_unicode_width", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10"
+serde-saphyr = "2"
 
 [dev-dependencies]
-jsonschema = { version = "0.55", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 
 [lints.rust]
 warnings = "deny"

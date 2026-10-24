@@ -98,12 +98,10 @@ impl Config {
                 return Err(error).with_context(|| format!("failed to read {}", path.display()));
             }
         };
-        // Parse to a YAML document first: `Mapping` rejects duplicate keys at every
-        // level, whereas deserializing straight into `BTreeMap` would silently keep
-        // the last occurrence and hide a conflicting provider or workspace entry.
-        let document: serde_yaml_ng::Value = serde_yaml_ng::from_str(&contents)
-            .with_context(|| format!("failed to parse sshpod config {}", path.display()))?;
-        let config = Self::deserialize(document)
+        // serde-saphyr rejects duplicate mapping keys by default, so a
+        // conflicting provider or workspace entry fails the load outright
+        // instead of silently keeping one occurrence.
+        let config = serde_saphyr::from_str::<Self>(&contents)
             .with_context(|| format!("failed to parse sshpod config {}", path.display()))?;
         config
             .validate()
@@ -132,8 +130,15 @@ impl Config {
         })?;
         set_private_directory_permissions(parent, create_directory)?;
 
-        let body = serde_yaml_ng::to_string(self)
-            .with_context(|| format!("failed to serialize sshpod config {}", path.display()))?;
+        // The document-start marker is written manually, so suppress the
+        // saphyr `%YAML 1.2` directive to keep on-disk shape stable.
+        let body = serde_saphyr::to_string_with_options(
+            self,
+            serde_saphyr::ser_options! {
+                no_lang_directive: true,
+            },
+        )
+        .with_context(|| format!("failed to serialize sshpod config {}", path.display()))?;
         let mut contents = String::with_capacity(DOCUMENT_START.len() + body.len());
         contents.push_str(DOCUMENT_START);
         contents.push_str(&body);

@@ -6,6 +6,14 @@ may be combined or rewritten as the prototype evolves.
 
 ## Unreleased
 
+### Changed
+
+- Swapped the YAML configuration backend from `serde_yaml_ng` to `serde-saphyr`
+  to drop the unmaintained `unsafe-libyaml` C dependency (RUSTSEC-2024-0449);
+  duplicate mapping keys are now rejected during the single typed parse.
+- Bumped `rust-version` to 1.89, `jsonc-parser` to 0.34, and `jsonschema` to
+  0.60.
+
 ### Added
 
 - Local and OpenSSH-backed Podman providers with persistent YAML/XDG
