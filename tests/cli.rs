@@ -35,7 +35,7 @@ fn help_and_version_work_without_podman() -> anyhow::Result<()> {
         } else {
             assert_eq!(stdout, expected);
         }
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, b"");
     }
     Ok(())
 }
@@ -47,7 +47,7 @@ fn doctor_reports_missing_podman_on_stderr() -> anyhow::Result<()> {
         .env("PATH", "")
         .output()?;
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("install Podman"));
     assert!(stderr.contains("PATH"));
@@ -125,7 +125,7 @@ fn up_without_devcontainer_stops_before_podman_or_workspace_persistence() -> any
         .output()?;
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("no Dev Container configuration found"));
     assert!(stderr.contains(".devcontainer/<folder>/devcontainer.json"));
